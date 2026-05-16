@@ -89,6 +89,7 @@ namespace HandbrakeBatchEncoder
                 }
             }
 
+            // If we didn't get a root folder, or if we're in debug mode, use the default
             rootFolder ??= @"J:\jeff\files\Video\TV";
             destFolder ??= @"J:\jeff\files\Temp\TV";
 
@@ -138,6 +139,7 @@ namespace HandbrakeBatchEncoder
                 return;
             }
 
+            // Info
             Console.WriteLine($"Got {videoFiles.Count} video file(s) ready to be processed...");
             int curFileCount = 1;
             HBEncoder myEncoder = new() { State = State };
@@ -158,33 +160,41 @@ namespace HandbrakeBatchEncoder
                         Directory.CreateDirectory(outputDir);
                     }
 
+                    // Debug
                     Debug.WriteLine("Output file path: " + outputFile);
                     Debug.WriteLine("Output directory: " + outputDir);
                     Debug.WriteLine("File name: " + fileName);
                     Debug.WriteLine("Original file path: " + file);
 
-                    // 
-                    VideoFile curVideo = new(file, State)
+                    // Set up the current video file object
+                    VideoFile curVideo = new(file)
                     {
                         State = State, 
                         OutputFilePath = outputFile,
                     };
 
+                    // Check if we've already processed this file before
                     if (curVideo.AlreadyProcessed)
                     {
+                        // Update the user
                         Console.Write("It appears that this file has already been processed");
+
+                        // Check to see if we are forcing a re-encode of already processed files
                         if (!State.ForceReEncodeExisting)
                         {
                             continue;
                         }
                     }
 
+                    // Save a copy of the original title and episode info before we potentially modify it for encoding
                     var (inputTitle, inputEpisode) = (curVideo.Title.Title, curVideo.Title.Episode);
-
+                    // Check to see if the output file already exists
                     bool alreadyExists = curVideo.OutputExists;
 
+                    // If it does, and we're not forcing a replace, skip it
                     if (alreadyExists && !State.ForceReplaceExisting)
                     {
+                        // Update the user and skip it
                         curFileCount++;
                         Console.WriteLine($"Skipping (already encoded match): {fileName} - " +
                             $"{curFileCount:#000}/{videoFiles.Count:#000}");
@@ -192,6 +202,7 @@ namespace HandbrakeBatchEncoder
                     }
                     else if (alreadyExists && State.ForceReplaceExisting)
                     {
+                        // Delete the existing file so that we can replace it with the new encode
                         File.Delete(fileName);
                     }
 

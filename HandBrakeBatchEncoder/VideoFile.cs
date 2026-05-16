@@ -56,6 +56,16 @@ namespace HandBrakeBatchEncoder
             // TODO: Init Title correctly
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="VideoFile"/> class with the specified file path and an empty
+        /// state.
+        /// </summary>
+        /// <param name="filePath">The path to the video file.</param>
+        public VideoFile(string filePath) : this(filePath, HBEState.Empty)
+        {
+            // This constructor allows creating a VideoFile with just a file path, using an empty state by default.
+        }
+
         #endregion
 
         #region Public Properties
