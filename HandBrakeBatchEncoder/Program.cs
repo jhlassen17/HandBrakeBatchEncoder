@@ -83,6 +83,9 @@ namespace HandbrakeBatchEncoder
                         string tmpStr = args[++i];
                         encodeMode = EncodingOptions.ParsePreset(tmpStr);
                         break;
+                    default:
+                        Console.WriteLine($"Warning: Unrecognized argument - {args[i]}");
+                        break;
                 }
             }
 
