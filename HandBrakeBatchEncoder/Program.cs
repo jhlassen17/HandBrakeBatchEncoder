@@ -1,4 +1,5 @@
 ﻿using HandBrakeBatchEncoder;
+using Microsoft.VisualBasic.FileIO;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -42,9 +43,9 @@ namespace HandbrakeBatchEncoder
                 // Debug args
                 args =
                 [
-                    "--RootFolder", @"J:\jeff\files\3D\Movies",
-                    "--DestFolder", @"J:\jeff\files\Travel\Movies",
-                    "--HoursThreshold", "24",
+                    "--RootFolder", @"J:\jeff\files\Temp\Travel\Remux",  //"J:\jeff\files\Video\TV\MXC (2003) {tvdb-72693}",
+                    "--DestFolder", @"J:\jeff\files\Travel\Movies", // @"J:\jeff\files\Travel\TV\MXC (2003) {tvdb-72693}",
+                    "--HoursThreshold", "969696",
                     // "--ForceReplace",
                     // "--ForceReEncode",
                     "--ConversionPreset", "xr",
@@ -90,14 +91,14 @@ namespace HandbrakeBatchEncoder
             }
 
             // If we didn't get a root folder, or if we're in debug mode, use the default
-            rootFolder ??= @"J:\jeff\files\Video\TV";
-            destFolder ??= @"J:\jeff\files\Temp\TV";
+            rootFolder ??= @"J:\jeff\files\3D\Movies";
+            destFolder ??= @"J:\jeff\files\Travel\Movies";
 
             // Set up state
             State = new HBEState(encodeMode)
             {
-                RootFolder = rootFolder, 
-                DestinationFolder = destFolder, 
+                RootFolder = rootFolder,
+                DestinationFolder = destFolder,
                 RecentHoursThreshold = hoursThreshold,
                 ForceReplaceExisting = forceReplace,
                 ForceReEncodeExisting = forceReEncode,
@@ -117,19 +118,35 @@ namespace HandbrakeBatchEncoder
             // Compute today's 12:07 AM
             DateTime cutoff = DateTime.Now.AddHours(State.RecentHoursThreshold * -1);
 
+            var videoExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                                { ".mkv", ".mp4", ".m4v", ".avi", ".mpeg", ".mpg" };
 
-            var videoFiles = Directory
-                .EnumerateFiles(State.RootFolder, "*.*", SearchOption.AllDirectories)
-                .Where(fl => !fl.Contains(".deletedByTMM", StringComparison.OrdinalIgnoreCase))
-                .Where(fi => !fi.Contains("-trailer.", StringComparison.OrdinalIgnoreCase))
-                .Where(f => f.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".m4v", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".avi", StringComparison.OrdinalIgnoreCase))
+            // Exclude files that are likely outputs or deleted items, and only include supported video formats.
+            var videoFiles = Directory.EnumerateFiles(State.RootFolder, "*.*", System.IO.SearchOption.AllDirectories)
+                .Where(f => !f.Contains(".deletedByTMM", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !f.Contains("-trailer.", StringComparison.OrdinalIgnoreCase))
+                .Where(f => videoExtensions.Contains(Path.GetExtension(f)))
                 .Select(f => new FileInfo(f))
                 .Where(f => f.LastAccessTime >= cutoff)
                 .Select(fi => fi.FullName)
+                .OrderBy(f => f)
                 .ToList();
+
+
+            //var videoFiles = Directory
+            //    .EnumerateFiles(State.RootFolder, "*.*", SearchOption.AllDirectories)
+            //    .Where(fl => !fl.Contains(".deletedByTMM", StringComparison.OrdinalIgnoreCase))
+            //    .Where(fi => !fi.Contains("-trailer.", StringComparison.OrdinalIgnoreCase))
+            //    .Where(f => f.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase) ||
+            //                f.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ||
+            //                f.EndsWith(".m4v", StringComparison.OrdinalIgnoreCase) ||
+            //                f.EndsWith(".avi", StringComparison.OrdinalIgnoreCase) ||
+            //                f.EndsWith(".mpeg", StringComparison.OrdinalIgnoreCase) ||
+            //                f.EndsWith(".mpg", StringComparison.OrdinalIgnoreCase))
+            //    .Select(f => new FileInfo(f))
+            //    .Where(f => f.LastAccessTime >= cutoff)
+            //    .Select(fi => fi.FullName)
+            //    .ToList();
 
             // Make sure that we got some files back
             if (videoFiles.Count == 0)
@@ -169,7 +186,7 @@ namespace HandbrakeBatchEncoder
                     // Set up the current video file object
                     VideoFile curVideo = new(file)
                     {
-                        State = State, 
+                        State = State,
                         OutputFilePath = outputFile,
                     };
 
