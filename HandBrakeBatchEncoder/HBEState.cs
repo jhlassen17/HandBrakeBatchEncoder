@@ -11,20 +11,15 @@ namespace HandBrakeBatchEncoder
     /// Represents the configuration and state information used for video encoding operations, including paths to
     /// required tools, processing options, and folder locations.
     /// </summary>
-    /// <remarks>HBEState provides properties and methods to facilitate video file processing workflows, such
-    /// as normalizing video titles and running external encoding or analysis tools. It encapsulates settings related to
-    /// file locations, encoding modes, and processing behavior, and is intended to be used as a central state object
-    /// for encoding tasks.</remarks>
     public partial class HBEState
     {
         #region Instance Vars
 
-
-        // Path to HandBrakeCLI for encoding video files
-        protected const string handBrakeCLIPath = @"C:\Program Files\HandBrake\HandBrakeCLI.exe";
-        // Path to ffprobe for analyzing video files (used for HDR detection and resolution checks to inform encoding settings)
+        // Path to ffmpeg for encoding video files
+        protected const string ffmpegPath = @"""C:\ProgramData\ChannelsDVR\latest\ffmpeg.exe""";
+        // Path to ffprobe for analyzing video files (HDR detection, subtitle inspection, processed-tag check)
         protected const string ffprobePath = @"C:\ProgramData\Sonarr\bin\ffprobe.exe";
-        // Path to mkvpropedit for setting MKV tags (used for marking processed files to avoid re-encoding)
+        // Path to mkvpropedit for setting MKV tags (marks processed files to avoid re-encoding)
         protected const string mkvpropeditPath = @"C:\Program Files\MKVToolNix\mkvpropedit.exe";
 
         #endregion
@@ -32,7 +27,7 @@ namespace HandBrakeBatchEncoder
         #region Constructors
 
         /// <summary>
-        /// Default consructor
+        /// Default constructor
         /// </summary>
         protected HBEState()
         {
@@ -40,14 +35,11 @@ namespace HandBrakeBatchEncoder
         }
 
         /// <summary>
-        /// Initializes a new instance of the HBEState class with the specified root folder, destination folder, and
-        /// encoding mode.
+        /// Initializes a new instance of the HBEState class with the specified encoding mode.
         /// </summary>
-        /// <param name="encodeMode">An integer value specifying the encoding mode to use. The valid range and meaning of values depend on the
-        /// implementation.</param>
+        /// <param name="encodeMode">An integer value specifying the encoding mode to use.</param>
         public HBEState(int encodeMode) : this()
         {
-            // Save it
             this.EncodeMode = encodeMode;
         }
 
@@ -56,12 +48,12 @@ namespace HandBrakeBatchEncoder
         #region Public Properties
 
         /// <summary>
-        /// Gets the full file system path to the HandBrakeCLI executable.
+        /// Gets the full file system path to the ffmpeg executable.
         /// </summary>
-        public static string HandBrakePath => handBrakeCLIPath;
+        public static string FFmpegPath => ffmpegPath;
 
         /// <summary>
-        /// Gets the full file system path to the ffprobe executable used by the application.
+        /// Gets the full file system path to the ffprobe executable.
         /// </summary>
         public static string FFProbePath => ffprobePath;
 
@@ -96,7 +88,7 @@ namespace HandBrakeBatchEncoder
         public int RecentHoursThreshold { get; set; } = 24;
 
         /// <summary>
-        /// Gets or sets a value indicating whether existing items should be forcibly replaced during the operation.
+        /// Gets or sets a value indicating whether existing items should be forcibly replaced.
         /// </summary>
         /// <remarks>Set this property to <see langword="true"/> to overwrite existing items without
         /// prompting or checking for conflicts. Use with caution, as enabling this option may result in loss of
@@ -120,7 +112,7 @@ namespace HandBrakeBatchEncoder
         public int EncodeMode { get; protected set; } = EncodingOptions.StandardPreset;
 
         /// <summary>
-        /// "Empty" state instance with default values for all properties, useful for testing or as a baseline configuration.
+        /// "Empty" state instance with default values, useful for testing or as a baseline configuration.
         /// </summary>
         public static HBEState Empty => new(EncodingOptions.StandardPreset)
         {
@@ -136,8 +128,7 @@ namespace HandBrakeBatchEncoder
         #region Public Methods
 
         /// <summary>
-        /// Parses and normalizes the file path to extract title and episode information, removing metadata markers and
-        /// standardizing the format.
+        /// Parses and normalizes the file path to extract title and episode information.
         /// </summary>
         /// <remarks>Recognizes episode patterns (S01E01, S01E01E02) and title-year formats. Removes
         /// content within curly braces and square brackets before processing.</remarks>

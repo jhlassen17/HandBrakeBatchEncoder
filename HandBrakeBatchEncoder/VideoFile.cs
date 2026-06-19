@@ -2,13 +2,15 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace HandBrakeBatchEncoder
 {
     /// <summary>
     /// Descriptor Class that encapsulates information about a video file to be processed, 
-    /// including its file path, normalized title and episode information,
+    /// including its file path, normalized title/episode information, and pre-built
+    /// ffmpeg argument fragments for subtitles and HDR.
     /// </summary>
     public partial class VideoFile
     {
@@ -32,7 +34,7 @@ namespace HandBrakeBatchEncoder
             // Nothing to do at the moment
             this.FilePath = string.Empty;
             this.State = HBEState.Empty;
-            this.Title = TitleDescriptor.Empty; 
+            this.Title = TitleDescriptor.Empty;
         }
 
         /// <summary>
@@ -141,12 +143,16 @@ namespace HandBrakeBatchEncoder
         }
 
         /// <summary>
-        /// Gets or sets the subtitle-related command-line arguments.
+        /// ffmpeg-style subtitle argument fragment, e.g.:
+        ///   "-map 0:s:2 -c:s copy -disposition:s:0 default"
+        ///   "-map 0:s:m:language:eng? -c:s copy -disposition:s:0 default"
         /// </summary>
         public string SubtitleArguments { get; protected set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the HDR optimization-related command-line arguments.`
+        /// ffmpeg-style HDR metadata argument fragment, e.g.:
+        ///   "-color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc"
+        /// Empty string when source is SDR.
         /// </summary>
         public string HDRArguments { get; protected set; } = string.Empty;
 
@@ -176,39 +182,68 @@ namespace HandBrakeBatchEncoder
 
         #region Private Methods
 
+        // ── HDR ─────────────────────────────────────────────────────────────────────────
+
         /// <summary>
-        /// Utility method that uses ffprobe to analyze the video file and determine if it contains HDR content.
+        /// Runs ffprobe and, if HDR content is detected, populates HDRArguments
+        /// with the appropriate ffmpeg colour-metadata flags.
         /// </summary>
         protected void GenerateHDRArguments()
         {
-            // Call the helper method to calculate HDR arguments based on ffprobe analysis
-            string hdrArgs = CalculateRes(this.FilePath);
-
-            // If we got any HDR-related arguments back, save them to the property
+            string hdrArgs = CalculateHDRArgs(this.FilePath);
             if (!string.IsNullOrWhiteSpace(hdrArgs))
-            {
                 this.HDRArguments = hdrArgs;
-            }
         }
 
         /// <summary>
-        /// Determines whether the ffprobe output indicates HDR content.
+        /// Detects HDR content via ffprobe and returns the corresponding ffmpeg flags.
+        ///
+        /// HandBrake equivalent: --hdr10-opt
+        ///
+        /// For HDR10 (smpte2084 / PQ):
+        ///   -color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc
+        /// For HLG (arib-std-b67):
+        ///   -color_trc arib-std-b67 -color_primaries bt2020 -colorspace bt2020nc
         /// </summary>
-        /// <param name="ffprobeOutput">The ffprobe output to analyze.</param>
-        /// <returns>true if HDR10 (PQ) or HLG transfer characteristics are detected; otherwise, false.</returns>
-        protected static bool IsHdr(string ffprobeOutput)
+        protected static string CalculateHDRArgs(string file)
         {
-            // Detect HDR10 (PQ) or HLG
-            return HDRRegex().IsMatch(ffprobeOutput);
+            // Run ffprobe to get color metadata for the first video stream
+            var args = $"-v error -select_streams v:0 " +
+                       $"-show_entries stream=color_transfer,color_primaries,width,height " +
+                       $"-of default=noprint_wrappers=1 \"{file}\"";
+
+            var probeResult = HBEState.RunProcess(HBEState.FFProbePath, args);
+
+            // If ffprobe fails, we log a warning and return empty args to avoid blocking the encoding process.
+            if (string.IsNullOrWhiteSpace(probeResult))
+            {
+                Console.WriteLine("⚠️  Warning: ffprobe failed to analyse the file. Proceeding without HDR metadata.");
+                return string.Empty;
+            }
+
+            // Check for HDR indicators in the ffprobe output and build the appropriate ffmpeg arguments.
+            if (IsHdr(probeResult))
+            {
+                Debug.WriteLine("HDR content detected. Adding ffmpeg HDR colour metadata flags.");
+                bool isHlg = probeResult.Contains("arib-std-b67", StringComparison.OrdinalIgnoreCase);
+                string trc = isHlg ? "arib-std-b67" : "smpte2084";
+                return $"-color_trc {trc} -color_primaries bt2020 -colorspace bt2020nc";
+            }
+
+            // No HDR detected, return empty string
+            return string.Empty;
         }
 
         /// <summary>
-        /// Parses ffprobe output to extract video resolution dimensions.
+        /// Returns true if ffprobe output indicates HDR10 (PQ) or HLG transfer characteristics.
         /// </summary>
-        /// <param name="ffprobeOutput">The raw output from ffprobe containing width and 
-        /// height information.</param>
-        /// <returns>A tuple containing the width and height in pixels, or (0, 0) if the 
-        /// values are not found.</returns>
+        protected static bool IsHdr(string ffprobeOutput)
+            => HDRRegex().IsMatch(ffprobeOutput);
+
+        /// <summary>
+        /// Parses ffprobe output for video resolution.
+        /// </summary>
+        /// <param name="ffprobeOutput">Raw ffprobe output containing lines like "width=3840" and "height=2160".</param>
         protected static (int width, int height) GetResolution(string ffprobeOutput)
         {
             // Initialize default values
@@ -226,139 +261,163 @@ namespace HandBrakeBatchEncoder
             return (width, height);
         }
 
-        /// <summary>
-        /// Calculates the appropriate HDR optimization arguments based on ffprobe analysis of the video file.
-        /// </summary>
-        /// <param name="file">Path to the video file</param>
-        /// <returns>HDR optimization arguments if HDR content is detected; otherwise, an empty string.</returns>
-        protected static string CalculateRes(string file)
-        {
-            // Set up ffprobe arguments to get color transfer, primaries, and
-            // resolution info for the first video stream
-            var args = $"-v error -select_streams v:0 " +
-            $"-show_entries stream=color_transfer,color_primaries,width,height " +
-            $"-of default=noprint_wrappers=1 \"{file}\"";
-
-            // Run ffprobe and capture the output
-            var probeResult = HBEState.RunProcess(HBEState.FFProbePath, args);
-
-            // If ffprobe failed to analyze the file, log a warning and return no HDR arguments
-            if (string.IsNullOrWhiteSpace(probeResult))
-            {
-                Console.WriteLine("⚠️  Warning: ffprobe failed to analyze the file. Proceeding without HDR optimizations or resolution checks.");
-                return string.Empty;
-            }
-
-            // Check if the output indicates HDR content based on color transfer characteristics
-            if (IsHdr(probeResult))
-            {
-                Debug.WriteLine("HDR content detected. Adding HDR optimization arguments.");
-                return "--hdr10-opt";
-            }
-
-            // If we got here, no HDR indicators were found. We could add additional logic here to check resolution and apply
-            // --large-file if desired, but for now we'll just return no HDR arguments.
-            return string.Empty;
-        }
+        // ── Subtitles ────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Generates subtitle command-line arguments based on the preferred subtitle track and assigns them to
-        /// SubtitleArguments.
+        /// Builds the ffmpeg subtitle argument fragment and assigns it to SubtitleArguments.
+        ///
+        /// HandBrake equivalents:
+        ///   manual   → --subtitle N --subtitle-default=1
+        ///   auto     → --subtitle-lang-list eng --all-subtitles --subtitle-default=1 --first-subtitle
         /// </summary>
         protected void GenerateSubtitleArguments()
         {
-            // Get the subtitle that we want to add
-            var (trackNum, manual) = GetPreferredSubtitleTrack();
+            // Get preferred subtitle track info from ffprobe analysis
+            var (trackIndex, manual, hasEnglish) = GetPreferredSubtitleTrack();
 
-            // Decide whether to explicitly set the subtitle, or accept all eng ones
-            string subtitleArgs = manual
-                ? $"--subtitle {trackNum ?? 1} --subtitle-default=1"
-                : "--subtitle-lang-list eng --all-subtitles --subtitle-default=1 --first-subtitle";
-
-            // Save the generated arguments to the property
-            this.SubtitleArguments = subtitleArgs;
+            // Build ffmpeg subtitle arguments based on the analysis results
+            if (manual && trackIndex.HasValue)
+            {
+                // Specific 0-based subtitle stream index found (e.g. SDH English at index 2)
+                this.SubtitleArguments =
+                    $"-map 0:s:{trackIndex.Value} -c:s copy -disposition:s:0 default";
+            }
+            else if (!manual && hasEnglish)
+            {
+                // Map all English subtitle streams; ? makes the map optional (no error if absent)
+                this.SubtitleArguments =
+                    "-map 0:s:m:language:eng? -c:s copy -disposition:s:0 default";
+            }
+            else
+            {
+                // No suitable subtitles found — omit subtitle args entirely
+                this.SubtitleArguments = string.Empty;
+            }
         }
 
         /// <summary>
-        /// Utility function that tries to get the first English or Undetermined track and 
-        /// returns its Handbrake index, along with a force flag
+        /// Uses ffprobe JSON output to inspect subtitle streams and return the
+        /// preferred track selection.
+        ///
+        /// Replaces the previous HandBrakeCLI --scan approach.
+        ///
+        /// Returns:
+        ///   trackIndex  — 0-based subtitle stream index for ffmpeg -map 0:s:N
+        ///   forceManual — true  → use -map 0:s:N (specific track)
+        ///                 false → use -map 0:s:m:language:eng? (all English)
+        ///   hasEnglish  — true if at least one English subtitle stream exists
         /// </summary>
-        /// <param name="file">Path to video file</param>
-        /// <returns>Nullable track number and manual search flag</returns>
-        protected (int? trackNumber, bool forceManual) GetPreferredSubtitleTrack()
+        protected (int? trackIndex, bool forceManual, bool hasEnglish) GetPreferredSubtitleTrack()
         {
-            // Set up scanner arguments to get subtitle info
-            string args = $"-v error --scan -i \"{this.FilePath}\"";
-            string output = HBEState.RunProcess(@"C:\Program Files\HandBrake\HandBrakeCLI.exe", args, Debugger.IsAttached);
+            // Run ffprobe to get subtitle stream info in JSON format
+            string args = $"-v quiet -print_format json -show_streams -select_streams s \"{this.FilePath}\"";
+            string output = HBEState.RunProcess(HBEState.FFProbePath, args, Debugger.IsAttached);
 
-            // Extract lines that describe subtitles
-            var subtitleLines = output.Split('\n')
-                .Where(l => l.Contains("Subtitle:", StringComparison.OrdinalIgnoreCase))
-                .Select(l => l.Trim())
-                .ToList();
+            // Make sure we got valid output before trying to parse it
+            if (string.IsNullOrWhiteSpace(output))
+                return (null, false, false);
 
-            // Check for no match
-            if (subtitleLines.Count == 0)
-                return (null, false);
+            try
+            {
+                // Parse the ffprobe JSON output to find subtitle stream information
+                using var doc = JsonDocument.Parse(output);
 
-            // HandBrake uses 1‑based numbering for --subtitle N
-            var numberedSubs = subtitleLines
-                .Select((line, index) => (line, index: index + 1))
-                .ToList();
+                // Check if the "streams" array exists in the JSON output
+                if (!doc.RootElement.TryGetProperty("streams", out var streams))
+                    return (null, false, false);
 
-            // Prefer explicit SDH English (case‑insensitive match)
-            var sdh = numberedSubs.FirstOrDefault(s =>
-                s.line.Contains("sdh", StringComparison.OrdinalIgnoreCase) &&
-                (s.line.Contains("(eng)", StringComparison.OrdinalIgnoreCase) ||
-                 s.line.Contains("english", StringComparison.OrdinalIgnoreCase)));
+                // Iterate through subtitle streams to find English and SDH tracks
+                int count = streams.GetArrayLength();
+                if (count == 0)
+                    return (null, false, false);
 
-            // If we found an explicit SDH English track, return it with the manual flag set to true
-            if (sdh.line != null)
-                return (sdh.index, true);     // "manual" because we pick a specific track
+                int? sdhEngIndex = null;
+                int? firstEngIndex = null;
 
-            // Fallback to first clearly English subtitle
-            var eng = numberedSubs.FirstOrDefault(s =>
-                s.line.Contains("(eng)", StringComparison.OrdinalIgnoreCase) ||
-                s.line.Contains("english", StringComparison.OrdinalIgnoreCase) ||
-                s.line.Contains("(iso639-2: eng)", StringComparison.OrdinalIgnoreCase));
+                for (int i = 0; i < count; i++)
+                {
+                    var stream = streams[i];
+                    string lang = GetStreamTagValue(stream, "language");
+                    string title = GetStreamTagValue(stream, "title");
 
-            // If we found a clearly English track, return it with the manual flag set to false to indicate we can be more flexible
-            if (eng.line != null)
-                return (eng.index, false);
+                    bool isEnglish = lang.Equals("eng", StringComparison.OrdinalIgnoreCase);
+                    bool isSdh = title.Contains("sdh", StringComparison.OrdinalIgnoreCase);
 
-            // Last fallback: single unlabeled subtitle (likely English)
-            if (subtitleLines.Count == 1)
-                return (1, true);
+                    if (isEnglish && isSdh && !sdhEngIndex.HasValue)
+                        sdhEngIndex = i;
 
-            // Multiple subs, no obvious choice → let normal "English list" logic handle it
-            return (null, false);
+                    if (isEnglish && !firstEngIndex.HasValue)
+                        firstEngIndex = i;
+                }
 
+                // Priority 1: SDH English → specific track, manual
+                if (sdhEngIndex.HasValue)
+                    return (sdhEngIndex, true, true);
+
+                // Priority 2: First clearly-English track → manual (exact index)
+                if (firstEngIndex.HasValue)
+                    return (firstEngIndex, false, true);
+
+                // Priority 3: Single unlabelled subtitle → assume English, manual
+                if (count == 1)
+                    return (0, true, true);
+
+                // Multiple subs, none clearly English → no subtitle args
+                return (null, false, false);
+            }
+            catch (JsonException ex)
+            {
+                Debug.WriteLine($"Error parsing ffprobe subtitle JSON: {ex.Message}");
+                return (null, false, false);
+            }
         }
 
+        // ── Processed-tag check ──────────────────────────────────────────────────────────
+
         /// <summary>
-        /// Checks whether the media file has been processed by verifying the presence and value of a metadata tag.
+        /// Uses ffprobe to check whether the MKV file has the COPYRIGHT=processed tag
+        /// set by a previous encoding run.
+        ///
+        /// Note: the original regex was malformed for JSON output. Fixed here.
+        /// ffprobe -print_format json produces: "COPYRIGHT": "processed"
         /// </summary>
-        /// <returns><see langword="true"/> if the processed tag exists with the expected value; otherwise, <see
-        /// langword="false"/>.</returns>
         protected bool HasProcessedTag()
         {
-            // Use ffprobe to get the value of the processed tag in JSON format
             string args = $"-v quiet -print_format json -show_format \"{this.FilePath}\"";
-            // Run ffprobe and capture the output
             string output = HBEState.RunProcess(HBEState.FFProbePath, args, Debugger.IsAttached);
-            // Look for COPYRIGHT tag
-            var match = Regex.Match(output, @"""TAG:" + HBEState.ProcessedTagName + """\s*:\s*""([^""]+)""", RegexOptions.IgnoreCase);
 
-            // If we don't find the tag, or if the value doesn't match our expected processed value, return false
+            if (string.IsNullOrWhiteSpace(output))
+                return false;
+
+            // Match: "COPYRIGHT": "processed"  (case-insensitive)
+            var match = Regex.Match(
+                output,
+                $"\"{HBEState.ProcessedTagName}\"\\s*:\\s*\"([^\"]+)\"",
+                RegexOptions.IgnoreCase);
+
             if (!match.Success)
                 return false;
 
-            // Extract the tag value and compare it to our expected processed value (case-insensitive)
-            string value = match.Groups[1].Value;
-
-            // Return true if the value matches our expected processed tag value, ignoring case
-            return value.Equals(HBEState.ProcessedTagValue, StringComparison.OrdinalIgnoreCase);
+            return match.Groups[1].Value.Equals(HBEState.ProcessedTagValue, StringComparison.OrdinalIgnoreCase);
         }
+
+        // ── Helpers ──────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Safely reads a named tag value from an ffprobe stream JsonElement.
+        /// Returns empty string if the element or tag is absent.
+        /// </summary>
+        private static string GetStreamTagValue(JsonElement stream, string tagName)
+        {
+            if (stream.TryGetProperty("tags", out var tags) &&
+                tags.TryGetProperty(tagName, out var value))
+            {
+                return value.GetString() ?? string.Empty;
+            }
+            return string.Empty;
+        }
+
+        // ── Generated Regexes ────────────────────────────────────────────────────────────
 
         /// <summary>
         /// Gets a regular expression that matches HDR transfer function identifiers.
@@ -382,6 +441,5 @@ namespace HandBrakeBatchEncoder
         private static partial Regex HeightRegex();
 
         #endregion
-
     }
 }

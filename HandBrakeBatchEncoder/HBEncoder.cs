@@ -2,22 +2,16 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace HandBrakeBatchEncoder
 {
     /// <summary>
-    /// HandBrake CLI Encoder class.  Handles the (re)encoding of a 
-    /// video file
+    /// FFmpeg NVENC encoder class. Handles (re)encoding of a video file using ffmpeg
+    /// in place of the previous HandBrakeCLI implementation.
     /// </summary>
-    public class HBEncoder
+    public partial class HBEncoder
     {
-        #region Instance Properties
-
-        //
-
-
-        #endregion
-
         #region Constructors
 
         /// <summary>
@@ -27,16 +21,6 @@ namespace HandBrakeBatchEncoder
         {
             //
         }
-
-        ///// <summary>
-        ///// State-dependent construcotor
-        ///// </summary>
-        ///// <param name="state">The current state of the app</param>
-        //public HBEncoder(HBEState state) : this()
-        //{
-        //    // Save it
-        //    this.State = state;
-        //}
 
         #endregion
 
@@ -52,220 +36,286 @@ namespace HandBrakeBatchEncoder
         #region Public Methods
 
         /// <summary>
-        /// Utility method that encodes the given video file 
-        /// into the file's preferred format
+        /// Encodes the given video file using ffmpeg with the preset determined by the current state.
         /// </summary>
         /// <param name="video">The video file to encode</param>
-        /// <returns>Success flag, true</returns>
+        /// <returns>True on success, false on failure</returns>
         public bool EncodeVideo(VideoFile video)
         {
-            // Set up vars
             bool result = false;
-            // Get the arguments
-            string arguments = this.GetHandBrakePresetForVideo(video);
-            // Make sure that we got some arguments
-            if (arguments != null)
+            string arguments = this.GetFFmpegArgsForVideo(video);
+            if (!string.IsNullOrEmpty(arguments))
             {
-                // Run the encoder
-                result = RunHandBrakeCLI(arguments, video);
+                result = RunFFmpegCLI(arguments, video);
             }
             // If we were successful, flag the video file
             if (result) SetMkvCopyrightTag(video);
-            return result; 
+            return result;
         }
 
         #endregion
 
-
         #region Utility Methods
 
         /// <summary>
-        /// Utility method that generates the appropriate HandBrake CLI arguments for encoding 
-        /// the given video file based on the current encoding mode in the state and the properties 
-        /// of the video file (such as whether it has HDR content or subtitles).
+        /// Builds the ffmpeg CLI argument string for the given video file based on the
+        /// current encoding mode and video properties (HDR, subtitles).
+        ///
+        /// HandBrake → ffmpeg translation notes:
+        ///   -e nvenc_h265           → -c:v hevc_nvenc
+        ///   --encoder-preset p4     → -preset p4
+        ///   -q 26                   → -cq 26          (NVENC constant quality)
+        ///   --maxWidth/Height       → -vf scale=...   (scale filter)
+        ///   --aencoder av_aac       → -c:a aac
+        ///   --mixdown stereo        → -ac 2
+        ///   --ab 160                → -b:a 160k
+        ///   --all-audio             → -map 0:a (all audio streams)
+        ///   --audio-copy-mask ...   → -c:a copy
+        ///   --audio-fallback aac    → (handled by -c:a copy for common codecs)
+        ///   --audio-lang-list eng   → -map 0:a:m:language:eng?
+        ///   --subtitle ...          → -map 0:s:... -c:s copy  (see SubtitleArguments)
+        ///   --hdr10-opt             → -color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc
+        ///   --color-matrix bt2020ncl→ -colorspace bt2020nc
+        ///   --optimize              → -movflags +faststart
+        ///   --markers               → -map_chapters 0
+        ///   --vfr                   → -vsync vfr
+        ///   --encoder-profile main10→ -profile:v main10
+        ///   --encoder-level 5.1     → -level:v 5.1
+        ///   -f av_mkv               → output filename with .mkv extension (format auto-detected)
+        ///   --crop 0:0:0:0          → (no crop; omitted — ffmpeg default)
         /// </summary>
-        /// <param name="video">The video file for which to generate HandBrake CLI arguments.</param>
-        /// <returns>A string containing the HandBrake CLI arguments.</returns>
-        protected string GetHandBrakePresetForVideo(VideoFile video)
+        protected string GetFFmpegArgsForVideo(VideoFile video)
         {
-            // Build HandBrake CLI arguments
-            string arguments;
             string subtitleArgs = video.SubtitleArguments;
             string hdrArgs = video.HDRArguments;
+            List<string> parts;
 
-            // Determine arguments based on encoding mode
             switch (this.State.EncodeMode)
             {
-                // XR Mode: optimized for playback on XR glasses, which can be picky about certain encoding features
-                // and often require more aggressive compression to fit within storage and performance constraints
+                // ── XR Mode ───────────────────────────────────────────────────────────────
+                // Optimised for XR glasses: 1080p cap, stereo AAC, BT.2020 colour matrix.
                 case EncodingOptions.XRMode:
-                    arguments = string.Join(" ", new string[]
-                    {
-                        // Input & Output
+                    parts =
+                    [
+                        // Input
                         $"-i \"{video.FilePath}\"",
-                        $"-o \"{video.OutputFilePath}\"",
-                        "-f av_mkv",                // Force MKV output (for better compatibility with XR glasses, which can be picky about MP4 features) - we will remux to MP4 later if needed for TV content
-                        // Video
-                        "-e nvenc_h265",           // Use NVENC H.265 (HEVC)
-                        "--encoder-preset p4",   // Preset 4 (roughly "medium") for good quality/speed balance
-                        "-q 26",                    // Reasonable quality/compression
-                        "--maxWidth 1920",         // Force 1080p max width
-                        "--maxHeight 1080",        // Force 1080p max height
-                        // Audio
-                        "--audio-lang-list eng",
-                        "--aencoder av_aac",       // Convert to AAC
-                        "--mixdown stereo",        // Stereo downmix
-                        "--ab 160",                // Bitrate for AAC
-                        // Subtitles
-                        subtitleArgs, 
-                        // Misc
-                        "--color-matrix bt2020ncl",     // Set color matrix for BT.2020 content
-                        "--optimize",             // Optimize for streaming
-                        "--markers",              // Keep chapter markers
-                    });
+                        "-y",                                           // Overwrite without prompting
+
+                        // Stream mapping
+                        "-map 0:v:0",                                   // First video stream
+                        "-map 0:a:m:language:eng?",                     // English audio only (? = optional)
+
+                        // Video codec
+                        "-c:v hevc_nvenc",                              // NVENC H.265 (= HB nvenc_h265)
+                        "-preset p4",                                   // NVENC preset p4 ≈ HB "p4" (medium)
+                        "-cq 26",                                       // Constant quality  (= HB -q 26)
+
+                        // Scale to 1920×1080 max; \, escapes the comma inside min() for ffmpeg
+                        @"-vf ""scale=min(iw\,1920):min(ih\,1080):force_original_aspect_ratio=decrease""",
+
+                        // Audio codec
+                        "-c:a aac",                                     // AAC  (= HB av_aac)
+                        "-ac 2",                                        // Stereo downmix  (= HB --mixdown stereo)
+                        "-b:a 160k",                                    // 160 kbps  (= HB --ab 160)
+
+                        // Colour / container
+                        "-colorspace bt2020nc",                         // BT.2020 colour matrix (= HB --color-matrix bt2020ncl)
+                        "-movflags +faststart",                         // Streaming optimisation (= HB --optimize)
+                        "-map_chapters 0",                              // Preserve chapter markers (= HB --markers)
+                    ];
+
+                    if (!string.IsNullOrWhiteSpace(subtitleArgs))
+                        parts.Add(subtitleArgs);
+
+                    parts.Add($"\"{video.OutputFilePath}\"");
                     break;
+
+                // ── Standard Mode ─────────────────────────────────────────────────────────
+                // Full-quality encode: up to 4K, copy audio streams, HDR metadata preserved.
                 case EncodingOptions.StandardPreset:
-                    // Standard encoding without XR‑specific settings
-                    arguments = string.Join(" ", new string[]
-                    {
-                            // Input & Output
-                            $"-i \"{video.FilePath}\"",
-                            $"-o \"{video.OutputFilePath}\"",
-                            "-f av_mkv",                // Force MKV output (for better compatibility with XR glasses, which can be picky about MP4 features) - we will remux to MP4 later if needed for TV content
-                            // Video
-                            "-e nvenc_h265",           // Use NVENC H.265 (HEVC)
-                            "--encoder-preset slow",   // Preset 4 (roughly "medium") for good quality/speed balance
-                            "-q 19",                    // Reasonable quality/compression 
-                            "--encoder-profile main10", // Use Main10 profile for better HDR support (if the source is HDR)
-                            "--encoder-level 5.1",      // Set level to 5.1 for better compatibility with older devices (many can't handle the default "auto" level for HEVC)
-                            "--vfr",                    // Use variable frame rate (VFR) to preserve original timing (important for TV content with mixed frame rates)
-                            "--maxWidth 3840",          // Force 4K max width (for 4K content, but allow smaller for TV)
-                            "--maxHeight 2160",         // Force 4K max height (for 4K content, but allow smaller for TV)
-                            "--crop 0:0:0:0",           // No cropping
-                            // Audio
-                            "--all-audio",
-                            "--audio-lang-list eng,und",    // Prefer English tracks, but allow Undetermined (often used for English tracks that just aren't labeled properly)
-                            "--audio-copy-mask aac,ac3,eac3,truehd,dts,dtshd,mp3,flac",     // Try to copy any English or Undetermined track that is in a common format
-                            "--audio-fallback aac",     // Fallback to AAC if no copyable track is found
-                            // Subtitles
-                            subtitleArgs,
-                            // Misc
-                            "--optimize",               // Optimize for streaming
-                            "--markers"                 // Keep chapter markers
-                    });
+                    parts =
+                    [
+                        // Input
+                        $"-i \"{video.FilePath}\"",
+                        "-y",
+
+                        // Stream mapping
+                        "-map 0:v:0",
+                        "-map 0:a:m:language:eng?",                     // English audio (optional)
+                        "-map 0:a:m:language:und?",                     // Undetermined audio (often English; optional)
+
+                        // Video codec
+                        "-c:v hevc_nvenc",                              // NVENC H.265
+                        "-preset slow",                                 // = HB --encoder-preset slow
+                        "-cq 19",                                       // = HB -q 19
+                        "-profile:v main10",                            // = HB --encoder-profile main10
+                        "-level:v 5.1",                                 // = HB --encoder-level 5.1
+                        "-vsync vfr",                                   // Variable frame rate (= HB --vfr)
+
+                        // Scale to 3840×2160 max
+                        @"-vf ""scale=min(iw\,3840):min(ih\,2160):force_original_aspect_ratio=decrease""",
+
+                        // Audio — copy all streams that ffmpeg can mux into MKV
+                        // (covers aac, ac3, eac3, truehd, dts, dtshd, mp3, flac — same list as HB --audio-copy-mask)
+                        "-c:a copy",
+
+                        // Container
+                        "-movflags +faststart",                         // = HB --optimize
+                        "-map_chapters 0",                              // = HB --markers
+                    ];
+
+                    if (!string.IsNullOrWhiteSpace(subtitleArgs))
+                        parts.Add(subtitleArgs);
+
+                    // HDR metadata flags (= HB --hdr10-opt)
                     if (!string.IsNullOrWhiteSpace(hdrArgs))
-                    {
-                        arguments += " " + hdrArgs; // Add HDR optimization arguments if applicable
-                    }
+                        parts.Add(hdrArgs);
+
+                    parts.Add($"\"{video.OutputFilePath}\"");
                     break;
+
                 default:
-                    return string.Empty;    // No encoding for "None" mode, so return empty string to indicate that we should skip this file
+                    return string.Empty;
             }
 
-            // Return the generated arguments
-            return arguments;
+            return string.Join(" ", parts);
         }
 
         /// <summary>
-        /// Utility function that runs HandBrakeCLI with the specified arguments
+        /// Runs ffmpeg with the given arguments and streams progress to the console.
+        ///
+        /// Unlike HandBrake (which wrote progress to stdout), ffmpeg writes ALL output —
+        /// including progress — to stderr. Progress lines are identified by containing
+        /// both "frame=" and "fps=".
         /// </summary>
-        /// <param name="arguments">The CLI arguments to use with HandBrake</param>
-        /// <param name="fileName">The full name of the file that we are working on</param>
-        /// <exception cref="Exception">Handbrake errors, if any</exception>
-        protected static bool RunHandBrakeCLI(string arguments, VideoFile video)
+        protected static bool RunFFmpegCLI(string arguments, VideoFile video)
         {
-            // Set up start info
-            ProcessStartInfo psi = new()
+            var psi = new ProcessStartInfo
             {
-                FileName = HBEState.HandBrakePath,
+                FileName = HBEState.FFmpegPath,
                 Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
             };
 
-            // Set up process
             using var process = new Process { StartInfo = psi };
 
-            // Set up handling for output data
-            process.OutputDataReceived += (s, e) =>
-            {
-                // Get out of here if there is nothing
-                if (string.IsNullOrWhiteSpace(e.Data)) return;
-
-                // HandBrake prints progress lines starting with "Encoding"
-                if (e.Data.StartsWith("Encoding:", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Move to the beginning of the current console line and overwrite
-                    var (title, episode) = (video.Title.Title, video.Title.Episode);
-
-                    // Make the display look nice
-                    string display = episode != null
-                        ? $"{title} [{episode}]"
-                        : title;
-
-                    // Update display
-                    Console.Write($"\r[{display}]  {e.Data.PadRight(Console.WindowWidth - display.Length - 5)}");
-                }
-                // Optional: display other messages for context
-                else if (e.Data.StartsWith("ERROR", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Error messages from HandBrake start with "ERROR", so we can check for those and display them prominently
-                    Console.WriteLine($"\n⚠️  {e.Data}");
-                }
-            };
-
-            // Set up handling of error data
+            // ffmpeg writes everything — banner, stream info, progress — to stderr.
             process.ErrorDataReceived += (s, e) =>
             {
-                // Get out of here if there is nothing
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
 
-                // Check for error messages and display them
-                if (e.Data.StartsWith("ERROR", StringComparison.OrdinalIgnoreCase))
+                if (e.Data.Contains("frame=") && e.Data.Contains("fps="))
                 {
-                    // Error messages from HandBrake start with "ERROR", so we can check for those and display them prominently
-                    Console.WriteLine($"\n⚠️  {e.Data}");
+                    string formatted = FormatProgressLine(e.Data);
+                    var (title, episode) = (video.Title.Title, video.Title.Episode);
+                    string display = episode != null ? $"{title} [{episode}]" : title;
+                    int padWidth = Math.Max(0, Console.WindowWidth - display.Length - 5);
+                    Console.Write($"\r[{display}]  {formatted.PadRight(padWidth)}");
+                }
+                else if (e.Data.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                      || e.Data.Contains("No such file or directory")
+                      || e.Data.Contains("Invalid argument")
+                      || e.Data.Contains("Conversion failed"))
+                {
+                    Console.Error.WriteLine($"\n⚠️  {e.Data}");
                 }
             };
 
-            // Start process
+            // ffmpeg stdout is usually empty when writing to a file, but capture it anyway.
+            process.OutputDataReceived += (s, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(e.Data)) return;
+                if (e.Data.StartsWith("Error", StringComparison.OrdinalIgnoreCase))
+                    Console.Error.WriteLine($"\n⚠️  {e.Data}");
+            };
+
+            // Start the process and begin reading output asynchronously
             process.Start();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
+            process.WaitForExit(7200000);
 
-            // Wait until it is done
-            process.WaitForExit();
-
-            // Check the exit code
-            if (process.ExitCode != 0)
-            {
-                // Fail
-                return false;
-            }
-            else
-            {
-                // Success
-                return true;
-            }
+            // Return true if ffmpeg exited with code 0 (success), false otherwise
+            return process.ExitCode == 0;
         }
 
         /// <summary>
-        /// Utility method that creates the "processed" tag flag in the output 
-        /// MKV file so that us and other apps know that the video has been encoded
+        /// Parses an ffmpeg size string (e.g. "512KiB", "1234MiB") into bytes,
+        /// then re-formats it at the largest unit that keeps the value ≥ 1.
+        /// Thresholds: GiB ≥ 1 GiB, MiB ≥ 1 MiB, KiB ≥ 1 KiB, else bytes.
         /// </summary>
-        /// <remarks>
-        /// Tag name = "COPYRIGHT", value = "processed" means that the file 
-        /// has already been handled
-        /// </remarks>
-        /// <returns>Path to the XML for the tag</returns>
+        private static string FormatSize(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return raw;
+
+            raw = raw.Trim();
+
+            int splitAt = -1;
+            for (int i = 0; i < raw.Length; i++)
+            {
+                if (char.IsLetter(raw[i]))
+                {
+                    splitAt = i;
+                    break;
+                }
+            }
+            if (splitAt <= 0) return raw;
+
+            if (!double.TryParse(raw[..splitAt].Trim(),
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out double value))
+                return raw;
+
+            string unit = raw[splitAt..].Trim().ToUpperInvariant();
+
+            double bytes = unit switch
+            {
+                "KIB" or "KB" => value * 1024,
+                "MIB" or "MB" => value * 1024 * 1024,
+                "GIB" or "GB" => value * 1024 * 1024 * 1024,
+                "TIB" or "TB" => value * 1024 * 1024 * 1024 * 1024,
+                _ => value
+            };
+
+            const double GiB = 1024d * 1024 * 1024;
+            const double MiB = 1024d * 1024;
+            const double KiB = 1024d;
+
+            return bytes switch
+            {
+                >= GiB => $"{bytes / GiB:F2} GiB",
+                >= MiB => $"{bytes / MiB:F1} MiB",
+                >= KiB => $"{bytes / KiB:F0} KiB",
+                _ => $"{bytes:F0} B"
+            };
+        }
+
+        /// <summary>
+        /// Replaces ffmpeg's raw "size=NNNkB" token in a progress line with a
+        /// properly scaled value (KiB/MiB/GiB) via FormatSize.
+        /// </summary>
+        private static string FormatProgressLine(string line)
+        {
+            return SizeRegex().Replace(line, m =>
+            {
+                string raw = m.Groups[1].Value;
+                if (raw.Equals("N/A", StringComparison.OrdinalIgnoreCase))
+                    return m.Value; // leave "size=N/A" alone
+
+                return $"size={FormatSize(raw)}";
+            });
+        }
+
+        /// <summary>
+        /// Creates a temporary MKV tag XML file marking the output as processed.
+        /// </summary>
         protected static string CreateTagXml()
         {
-            // File stuff
             string tempName = Path.GetRandomFileName();
             string path = Path.Combine(Path.GetTempPath(), Path.ChangeExtension(tempName, "xml"));
-            // Tag XML
             string xml = @"<?xml version=""1.0""?>
                         <Tags>
                           <Tag>
@@ -276,47 +326,38 @@ namespace HandBrakeBatchEncoder
                             </Simple>
                           </Tag>
                         </Tags>";
-            // Save
             File.WriteAllText(path, xml);
             return path;
         }
 
         /// <summary>
-        /// Sets the copyright tag in the specified MKV video file using an external tool.
+        /// Sets the COPYRIGHT=processed MKV tag on the output file via mkvpropedit,
+        /// allowing subsequent runs to detect already-processed files.
         /// </summary>
-        /// <remarks>This method uses the MKVPropEdit tool to apply copyright metadata to the MKV file.
-        /// The method creates a temporary tag XML file, applies it to the video, and then deletes the temporary file.
-        /// If a debugger is attached, process output and errors are written to the debug output window.</remarks>
-        /// <param name="video">The video file for which to set the copyright tag. Must not be null and should have a valid output file
-        /// path.</param>
         protected static void SetMkvCopyrightTag(VideoFile video)
         {
             try
             {
-                // Create the lag flag file
                 string tagFile = CreateTagXml();
-                // Set up args
                 string args = $"\"{video.OutputFilePath}\" --tags global:\"{tagFile}\"";
-                // Run the tool
                 string result = HBEState.RunProcess(HBEState.MKVPropEditPath, args, Debugger.IsAttached);
-                // Debug
                 if (Debugger.IsAttached) Debug.WriteLine(result);
-                // Should we also apply the tag to the source file?
-                    //args = $"\"{video.FilePath}\" --tags global:\"{tagFile}\"";
-                    //result = this.State.RunProcess(this.State.MKVPropEditPath, args, Debugger.IsAttached);
-                    //if (Debugger.IsAttached) Debug.WriteLine(result);
-                // Delete the old tag file
                 File.Delete(tagFile);
             }
             catch (Exception ex)
             {
-                // It gave me error
-                Debug.WriteLine($"\n⚠️  {ex.Data}");
-                //throw;
+                Debug.WriteLine($"\n⚠️  {ex.Message}");
             }
         }
 
-        #endregion
+        /// <summary>
+        /// Regex to match ffmpeg's "size=NNNkB" token in progress lines, 
+        /// capturing the raw size value for reformatting.
+        /// </summary>
+        /// <returns></returns>
+        [GeneratedRegex(@"size=\s*(\S+)")]
+        private static partial Regex SizeRegex();
 
+        #endregion
     }
 }
